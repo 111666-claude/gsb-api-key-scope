@@ -19,11 +19,35 @@ type Key struct {
 type State struct {
 	Keys      []Key
 	Overrides map[string][]string
+
+	index   map[string]int
+	revoked map[string]bool
 }
 
 // NewState 建一份台账。
 func NewState() *State {
-	return &State{Overrides: map[string][]string{}}
+	return &State{
+		Overrides: map[string][]string{},
+		index:     map[string]int{},
+		revoked:   map[string]bool{},
+	}
+}
+
+func (st *State) init() {
+	if st.Overrides == nil {
+		st.Overrides = map[string][]string{}
+	}
+	if st.index == nil {
+		st.index = map[string]int{}
+		for i := range st.Keys {
+			if _, ok := st.index[st.Keys[i].ID]; !ok {
+				st.index[st.Keys[i].ID] = i
+			}
+		}
+	}
+	if st.revoked == nil {
+		st.revoked = map[string]bool{}
+	}
 }
 
 func contains(scopes []string, action string, c *Counter) bool {
@@ -38,49 +62,50 @@ func contains(scopes []string, action string, c *Counter) bool {
 
 // Issue 签发一个 key。
 func (st *State) Issue(id, owner string, scopes []string, expires int, c *Counter) {
-	for i := range st.Keys {
-		c.Scanned++
-		if st.Keys[i].ID == id {
-			st.Keys[i].Scopes = scopes
-			return
-		}
+	st.init()
+	if _, ok := st.index[id]; ok {
+		return
 	}
+	st.index[id] = len(st.Keys)
 	st.Keys = append(st.Keys, Key{ID: id, Owner: owner, Scopes: scopes, Expires: expires})
 }
 
 // Revoke 吊销一个 key。
 func (st *State) Revoke(id string, c *Counter) {
-	for i := range st.Keys {
-		c.Scanned++
-		if st.Keys[i].ID == id {
-			st.Keys[i].Revoked = true
-			return
-		}
+	st.init()
+	if i, ok := st.index[id]; ok {
+		st.Keys[i].Revoked = true
 	}
 }
 
 // RevokeOwner 按所有者级联吊销。
 func (st *State) RevokeOwner(owner string, c *Counter) {
-	for i := range st.Keys {
-		c.Scanned++
-		if st.Keys[i].Owner == owner {
-			_ = st.Keys[i].ID
-		}
-	}
+	st.init()
+	st.revoked[owner] = true
 }
 
 // Grant 给某个所有者的覆盖层加一个动作。
 func (st *State) Grant(owner, action string) {
+	st.init()
 	st.Overrides[owner] = append(st.Overrides[owner], action)
 }
 
 // Check 判断某个 key 能否执行某个动作。
 func (st *State) Check(id, action string, now int, c *Counter) bool {
-	for i := range st.Keys {
-		c.Scanned++
-		if st.Keys[i].ID == id {
-			return !st.Keys[i].Revoked && contains(st.Keys[i].Scopes, action, c)
-		}
+	st.init()
+	i, ok := st.index[id]
+	if !ok {
+		return false
 	}
-	return false
+	key := &st.Keys[i]
+	if key.Revoked || st.revoked[key.Owner] {
+		return false
+	}
+	if key.Expires > 0 && now >= key.Expires {
+		return false
+	}
+	if contains(key.Scopes, action, c) {
+		return true
+	}
+	return contains(st.Overrides[key.Owner], action, c)
 }
