@@ -19,11 +19,18 @@ type Key struct {
 type State struct {
 	Keys      []Key
 	Overrides map[string][]string
+
+	byID    map[string]int
+	byOwner map[string][]int
 }
 
 // NewState 建一份台账。
 func NewState() *State {
-	return &State{Overrides: map[string][]string{}}
+	return &State{
+		Overrides: map[string][]string{},
+		byID:      map[string]int{},
+		byOwner:   map[string][]int{},
+	}
 }
 
 func contains(scopes []string, action string, c *Counter) bool {
@@ -36,36 +43,31 @@ func contains(scopes []string, action string, c *Counter) bool {
 	return false
 }
 
-// Issue 签发一个 key。
+// Issue 签发一个 key；同一个 key 再次签发不改变既有登记。
 func (st *State) Issue(id, owner string, scopes []string, expires int, c *Counter) {
-	for i := range st.Keys {
-		c.Scanned++
-		if st.Keys[i].ID == id {
-			st.Keys[i].Scopes = scopes
-			return
-		}
+	c.Scanned++
+	if _, ok := st.byID[id]; ok {
+		return
 	}
+	idx := len(st.Keys)
 	st.Keys = append(st.Keys, Key{ID: id, Owner: owner, Scopes: scopes, Expires: expires})
+	st.byID[id] = idx
+	st.byOwner[owner] = append(st.byOwner[owner], idx)
 }
 
 // Revoke 吊销一个 key。
 func (st *State) Revoke(id string, c *Counter) {
-	for i := range st.Keys {
-		c.Scanned++
-		if st.Keys[i].ID == id {
-			st.Keys[i].Revoked = true
-			return
-		}
+	c.Scanned++
+	if idx, ok := st.byID[id]; ok {
+		st.Keys[idx].Revoked = true
 	}
 }
 
 // RevokeOwner 按所有者级联吊销。
 func (st *State) RevokeOwner(owner string, c *Counter) {
-	for i := range st.Keys {
+	for _, idx := range st.byOwner[owner] {
 		c.Scanned++
-		if st.Keys[i].Owner == owner {
-			_ = st.Keys[i].ID
-		}
+		st.Keys[idx].Revoked = true
 	}
 }
 
@@ -76,11 +78,20 @@ func (st *State) Grant(owner, action string) {
 
 // Check 判断某个 key 能否执行某个动作。
 func (st *State) Check(id, action string, now int, c *Counter) bool {
-	for i := range st.Keys {
-		c.Scanned++
-		if st.Keys[i].ID == id {
-			return !st.Keys[i].Revoked && contains(st.Keys[i].Scopes, action, c)
-		}
+	c.Scanned++
+	idx, ok := st.byID[id]
+	if !ok {
+		return false
 	}
-	return false
+	key := &st.Keys[idx]
+	if key.Revoked {
+		return false
+	}
+	if key.Expires > 0 && now >= key.Expires {
+		return false
+	}
+	if contains(key.Scopes, action, c) {
+		return true
+	}
+	return contains(st.Overrides[key.Owner], action, c)
 }
